@@ -54,12 +54,46 @@ void ToFloat(T* in, float* out, int noOfComponents)
   }
 }
 
+/*
+MC: Model coordinates: local
+WC: World coordinates
+VC: View coordinates: from the eyes (camera)
+DC: Device coordinates: display
+
+Normal matrix:
+The normal matrix is the matrix which preserves vertex normals under an affine transform.
+If you do the math, this turns out to be the inverse transpose of the modelview matrix.
+Note that you can make the code much more efficient whenever the transform, i.e. the modelview,
+happens to be orthogonal; this would imply that the inverse transpose is just the identity
+transform, which then makes the normal matrix the same as the modelview matrix.
+
+The following link describes coordinates systems in openGL:
+https://learnopengl.com/Getting-started/Coordinate-Systems
+
+Model matrix:
+Maps from MC (model/local coordinates) to WC.
+I believe this is internal to VTK, since actors exist in WC.
+
+View matrix:
+Maps from WC to VC. Commonly refered to as "ModelView matrix".
+
+Projection matrix:
+Maps from WC to DC.
+
+*/
+
+
+
 void SetCameraShaderParameters(vtkShaderProgram* prog, vtkRenderer* ren, vtkOpenGLCamera* cam)
 {
   vtkMatrix4x4* glTransformMatrix;
   vtkMatrix4x4* modelViewMatrix;
   vtkMatrix3x3* normalMatrix;
   vtkMatrix4x4* projectionMatrix;
+  // modelViewMatrix = WCVCMatrix: WC to VC (world to view) transformation
+  // normalMatrix: transforms normals (vectors) from WC to VC
+  // projectionMatrix = VCDCMatrix: VC to DC (view to display) transformation
+  // glTransformMatrix = WCDCMatrix: WC to DC (world to display) transformation
   cam->GetKeyMatrices(ren, modelViewMatrix, normalMatrix, projectionMatrix, glTransformMatrix);
 
   vtkNew<vtkMatrix4x4> InverseProjectionMat;
@@ -85,8 +119,10 @@ void SetCameraShaderParameters(vtkShaderProgram* prog, vtkRenderer* ren, vtkOpen
     //prog->SetUniform3fv("in_projectionDirection", 1, &fvalue3);
   }
 
+  // camera position in WC
   ToFloat(cam->GetPosition(), fvalue3, 3);
   prog->SetUniform3fv("u_camera", 1, &fvalue3);
+  //cout << "u_camera: " << fvalue3[0] << ", " << fvalue3[1] << ", " << fvalue3[2] << endl;
 }
 
 
@@ -165,7 +201,7 @@ int main(int argc, char* argv[])
 
 
 
-  /*
+
   actor->GetProperty()->SetAmbientColor(0.2, 0.2, 0.2);
   actor->GetProperty()->SetDiffuseColor(1.0, 1.0, 1.0);
   actor->GetProperty()->SetSpecularColor(1.0, 1.0, 1.0);
@@ -174,11 +210,14 @@ int main(int argc, char* argv[])
   actor->GetProperty()->SetAmbient(0.1);
   //actor->GetProperty()->SetSpecularPower(100.0);
   actor->GetProperty()->SetOpacity(0.5);
-  */
 
-  //actor->GetProperty()->SetOpacity(0.7);
+  // set a new opacity uniform
+  float opacity = actor->GetProperty()->GetOpacity();
 
-  // method 1: still does not work properly
+  // shader works properly only with with vtk opacity in 1.0
+  actor->GetProperty()->SetOpacity(1.0);
+
+
   // read vertex shader (modified version, adapted to vtk)
   std::ifstream vertexShader("/home/axel/work/tutorial/VTK/GlassyShader/glass.vtkVert.glsl");
   std::ostringstream vertexCode;
@@ -200,13 +239,13 @@ int main(int argc, char* argv[])
       "//VTK::Normal::Dec",  // replace the normal block
       true,                  // before the standard replacements
       "//VTK::Normal::Dec\n" // we still want the default
-      //"uniform mat4 u_viewProjectionMatrix;\n"  // MCDCMatrix?
-      //"uniform mat4 u_modelMatrix;\n"           // MCVCMatrix?
+      //"uniform mat4 u_viewProjectionMatrix;\n"  // MCDCMatrix? or VCDCMatrix?
+      //"uniform mat4 u_modelMatrix;\n"           // MCVCMatrix? should be MCWCMatrix
       //"uniform mat3 u_normalMatrix;\n"  // normalMatrix
-      "uniform vec4 u_camera;\n"
+      "uniform vec4 u_camera;\n"          // camera position in WC
 
-      //"in vec4 a_vertex;\n"             // vertexMC
-      //"in vec3 a_normal;\n"             // normalMC
+      //"in vec4 a_vertex;\n"             // vertexMC (vertex position in MC)
+      //"in vec3 a_normal;\n"             // normalMC (vertex normal in MC)
       "out vec3 v_reflection;\n"
       "out vec3 v_refraction;\n"
       "out float v_fresnel;\n"
@@ -224,20 +263,23 @@ int main(int argc, char* argv[])
       "//VTK::Normal::Impl",  // replace the normal block
       true,                   // before the standard replacements
       "//VTK::Normal::Impl\n" // we still want the default
-      "vec4 vertex = MCVCMatrix*vertexMC;\n"
+      "vec4 vertex = MCVCMatrix*vertexMC;\n"  // vertex in VC (should it be WC?)
 
-      "vec3 incident = normalize(vec3(vertex-u_camera));\n"
+      //"vec3 incident = normalize(vec3(vertex-u_camera));\n" // bug: camera is in WC and vertex in VC
+      "vec4 cameraVC = MCVCMatrix*u_camera;\n"
+      "vec3 incident = normalize(vec3(vertex-cameraVC));\n" // in VC
 
       // Assume incoming normal is normalized.
-      "vec3 normal = normalMatrix*normalMC;\n"
+      //"vec3 normal = normalMatrix*normalMC;\n"    // normal in VC
+      // normal in VC is already computed in "normalVCVSOutput"
 
-      "v_refraction = refract(incident, normal, Eta);\n"
-      "v_reflection = reflect(incident, normal);\n"
+      "v_refraction = refract(incident, normalVCVSOutput, Eta);\n"
+      "v_reflection = reflect(incident, normalVCVSOutput);\n"
 
       // see http://en.wikipedia.org/wiki/Schlick%27s_approximation
-      "v_fresnel = R0 + (1.0 - R0) * pow((1.0 - dot(-incident, normal)), 5.0);\n",
+      "v_fresnel = R0 + (1.0 - R0) * pow((1.0 - dot(-incident, normalVCVSOutput)), 5.0);\n",
 
-     // "gl_Position = MCDCMatrix*vertex;\n",
+     // "gl_Position = MCDCMatrix*vertexMC;\n",   // vertex position in DC
       false // only do it once
   );
 
@@ -247,6 +289,7 @@ int main(int argc, char* argv[])
       true,                  // before the standard replacements
       "//VTK::Normal::Dec\n" // we still want the default
       "uniform samplerCube u_cubemap;\n"
+      //"uniform float opacity;\n"  // declared using "SetUniformf"
       "in vec3 v_refraction;\n"
       "in vec3 v_reflection;\n"
       "in float v_fresnel;\n"
@@ -257,14 +300,16 @@ int main(int argc, char* argv[])
   sp->AddFragmentShaderReplacement(
         "//VTK::Color::Dec",
         true,
-        "//VTK::Color::Dec\n",
+        "\n",
+        //"//VTK::Color::Dec\n",  // ambient, opacity, specular, etc.
         false
   );
 
   sp->AddFragmentShaderReplacement(
         "//VTK::Color::Impl",
         true,
-        "//VTK::Color::Impl\n",
+        "\n",
+        //"//VTK::Color::Impl\n",
         false
   );
 
@@ -276,13 +321,13 @@ int main(int argc, char* argv[])
       "\n"
       "  fragColor = mix(refractionColor, reflectionColor, v_fresnel);\n"
       "  fragOutput0 = fragColor;\n"
-      "  fragOutput0.a = 0.9;\n",
+      "  fragOutput0.a = opacity;\n",
       //"  ambientColor = fragColor.rgb;\n"
       //"  opacity = fragColor.a;\n"
       //"//VTK::Light::Impl\nn", // we still want the default calc
       //"  fragOutput0= fragColor;\n"
-      //"  fragOutput0.a = opacity;\n",
-      false // only do it once
+      //"  fragOutput0.a = opacityUniform;\n",
+      true // only do it once
   );
 
   auto myCallback = vtkSmartPointer<vtkShaderCallback>::New();
@@ -318,6 +363,7 @@ int main(int argc, char* argv[])
   myCallback->Renderer->UseImageBasedLightingOn();
 
 
+  sp->GetFragmentCustomUniforms()->SetUniformf("opacity",opacity);
 
   renderWindow->Render();
   renderer->GetActiveCamera()->SetPosition(-.3, 0, .08);
